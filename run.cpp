@@ -250,7 +250,7 @@ void write_line(ofstream& output_file, const Stat& w_stat, unsigned int window_s
 
 	double pv1 = binom_p_value(w_stat.p0_real_first, w_stat.k_first, w_stat.n_first);
 	double pv2 = binom_p_value(w_stat.p0_real_second, w_stat.k_second, w_stat.n_second);
-	double pv3 = binom_p_value(w_stat.p0_theor_third, w_stat.k_third, w_stat.n_third);
+	double pv3 = binom_p_value(w_stat.p0_real_third, w_stat.k_third, w_stat.n_third);
 	double pv4 = binom_p_value(w_stat.p0_real_fourth, w_stat.k_fourth, w_stat.n_fourth);
 	
 	output_file
@@ -259,25 +259,31 @@ void write_line(ofstream& output_file, const Stat& w_stat, unsigned int window_s
 		<< (window_start + 1) << '\t'
 		<< (window_end + 1) << '\t'
 
-		<< w_stat.p0_real_first << '\t'
+		<< NA_double{ w_stat.p0_real_first } << '\t'
 		<< w_stat.k_first << '\t'
 		<< w_stat.n_first << '\t'
-		<< pv1 << '\t'
+		<< NA_double{ pv1 } << '\t'
 
-		<< w_stat.p0_real_second << '\t'
+		<< NA_double{ w_stat.p0_real_second } << '\t'
 		<< w_stat.k_second << '\t'
 		<< w_stat.n_second << '\t'
-		<< pv2 << '\t'
+		<< NA_double{ pv2 } << '\t'
 
-		<< w_stat.p0_theor_third << '\t'
+		<< NA_double{ w_stat.p0_real_third } << '\t'
 		<< w_stat.k_third << '\t'
 		<< w_stat.n_third << '\t'
-		<< pv3 << '\t'
+		<< NA_double{ pv3 } << '\t'
 
-		<< w_stat.p0_real_fourth << '\t'
+		<< NA_double{ w_stat.p0_real_fourth } << '\t'
 		<< w_stat.k_fourth << '\t'
 		<< w_stat.n_fourth << '\t'
-		<< pv4 << '\n';
+		<< NA_double{ pv4 } << '\t'
+
+		// coverage
+		<< w_stat.total_len << '\t'
+		<< w_stat.c_ds << '\t'
+		<< w_stat.tc_ds << '\t'
+		<< w_stat.tc_ds_3_end_hairpin << '\n';
 }
 
 

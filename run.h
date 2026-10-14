@@ -5,10 +5,27 @@
 #include <cmath>
 #include <algorithm>
 #include <stdexcept>
+#include <limits>
+#include <ostream>
 
 #include "common.h"
 
 namespace fs = std::filesystem;
+
+
+// value for undefined statistics (written as NA)
+const double NA = std::numeric_limits<double>::quiet_NaN();
+
+//structure to write double as NA if it is undefined
+struct NA_double {
+	double value;
+};
+
+inline std::ostream& operator<<(std::ostream& out, const NA_double& v) {
+	if (std::isnan(v.value))
+		return out << "NA";
+	return out << v.value;
+}
 
 
 //structure for statistics
@@ -42,6 +59,7 @@ struct Stat {
 	//third method: TC ds, c -> t or c -> g / TC ds
 	const double t_theor_third = 1.0;
 	const double p0_theor_third = 2.0 / 3.0;
+	double p0_real_third; // p0_theor_third, or NA if there is no TC ds in window
 	unsigned int k_third; // mutations in TC ds, c -> t or c -> g
 	unsigned int n_third; // mutations in TC ds
 	//fourth method: TC ds on 3' end of hairpin loop / TC ds
@@ -63,7 +81,11 @@ struct Stat {
 		mutations_tc_ds_apobec_hairpin_end(mutations_tc_ds_apobec_hairpin_end_)
 
 		{
-			t_real_first = (double)tc_ds / total_len;
+			// if there are no targets in window, t and p0 are NA (NaN)
+			if (total_len != 0)
+				t_real_first = (double)tc_ds / total_len;
+			else
+				t_real_first = NA;
 			p0_real_first = (t_real_first * 2.0) / 3.0;
 			k_first = mutations_tc_ds_apobec;
 			n_first = mutations_all;
@@ -71,18 +93,22 @@ struct Stat {
 			if (c_ds != 0)
 				t_real_second = (double)tc_ds / c_ds;
 			else
-				throw std::runtime_error("there is no c ds in window, it must be too short");
+				t_real_second = NA;
 			p0_real_second = (t_real_second * 2.0) / 3.0;
 			k_second = mutations_tc_ds_apobec;
 			n_second = mutations_c_ds;
 
+			if (tc_ds != 0)
+				p0_real_third = p0_theor_third;
+			else
+				p0_real_third = NA;
 			k_third = mutations_tc_ds_apobec;
 			n_third = mutations_tc_ds;
 
 			if (tc_ds != 0)
 				t_real_fourth = (double)tc_ds_3_end_hairpin / tc_ds;
 			else
-				throw std::runtime_error("there is no tc ds in window, it must be too short");
+				t_real_fourth = NA;
 			p0_real_fourth = (t_real_fourth * 2.0) / 3.0;
 			k_fourth = mutations_tc_ds_apobec_hairpin_end;
 			n_fourth = mutations_tc_ds;
@@ -142,7 +168,8 @@ inline double binom_pmf(double p, unsigned k, unsigned n) {
 }
 
 inline double binom_p_value(double p0, unsigned k, unsigned n) {
-    if (k == 0)          return 1.0;  
+    if (std::isnan(p0))  return NA;
+    if (k == 0)          return 1.0;
     if (n == 0 || k > n) return 0.0;
     double s = 0.0;
     for (unsigned i = n; i >= k; --i) {   
