@@ -1,4 +1,6 @@
 #include <iostream>
+#include <algorithm>
+#include <cctype>
 
 #include "index.h"
 #include "run.h"
@@ -7,11 +9,19 @@
 
 using namespace std;
 
+
+//function to check that argument is natural number (not option)
+static bool is_number(const string& s) {
+    return !s.empty() && all_of(s.begin(), s.end(), [](unsigned char c) { return isdigit(c); });
+}
+
+
 int main(int argc, char* argv[]) {
 
-    try 
+    try
     {
         ProgrammOptions options;
+        bool default_window = false;
         for (int i = 1; i < argc; ++i) {
             string arg = argv[i];
             if (arg == "-g")
@@ -32,8 +42,16 @@ int main(int argc, char* argv[]) {
                 options.start_position = stoi(argv[++i]); //1-based
             else if (arg == "-e" && i + 1 < argc)
                 options.end_position = stoi(argv[++i]);
-            else if (arg == "-w" && i + 1 < argc)
-                options.window_len = stoi(argv[++i]);
+            else if (arg == "-w") {
+                // -w without value: default window and jump
+                if (i + 1 < argc && is_number(argv[i + 1])) {
+                    options.window_len = stoi(argv[++i]);
+                }
+                else {
+                    options.window_len = DEFAULT_WINDOW_LEN;
+                    default_window = true;
+                }
+            }
             else if (arg == "-j" && i + 1 < argc)
                 options.jump = stoi(argv[++i]);
             else if (arg == "-a" && i + 1 < argc)
@@ -61,8 +79,17 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        if ((options.window_len < 0 && options.jump > 0) || (options.window_len > 0 && options.jump < 0)) {
-            cerr << "both window len and jump len must be provided" << endl;
+        if (!options.use_window() && options.jump != -1) {
+            cerr << "jump len (-j) can be used only with window (-w)" << endl;
+            return 1;
+        }
+
+        // -w without -j: default jump for default window, otherwise jump = window len
+        if (options.use_window() && options.jump == -1)
+            options.jump = default_window ? DEFAULT_JUMP : options.window_len;
+
+        if (options.use_window() && (options.window_len <= 0 || options.jump <= 0)) {
+            cerr << "window len and jump len must be positive" << endl;
             return 1;
         }
 
@@ -100,7 +127,7 @@ int main(int argc, char* argv[]) {
             }
 
             if (options.chromosome.empty()) {
-                cerr << "if a window is used, a chromosome must be specified" << endl;
+                cerr << "if start and end positions are used, a chromosome must be specified" << endl;
                 return 1;
             }
 

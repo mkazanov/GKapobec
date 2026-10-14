@@ -250,8 +250,8 @@ void generate_index(const ProgrammOptions& options) {
 		shift_bit_left(chr.A, chr.GA);
 		bit_and_inplace(chr.G, chr.GA);
 
-		bit_and(chr.TC, chr.end3_hairpin, chr.TC_end3_hairpin);
-		bit_and(chr.GA, chr.end5_hairpin, chr.GA_end5_hairpin);
+		::bit_and(chr.TC, chr.end3_hairpin, chr.TC_end3_hairpin);
+		::bit_and(chr.GA, chr.end5_hairpin, chr.GA_end5_hairpin);
 
 		byte = 0;
 		for (int vector_pos = 0; vector_pos < chr.vector_size; ++vector_pos) {

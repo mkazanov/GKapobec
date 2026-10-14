@@ -7,6 +7,8 @@
 
 #define MAX_CHR_LENGTH 250'000'000
 #define CHR_CNT 24
+#define DEFAULT_WINDOW_LEN 1'000'000
+#define DEFAULT_JUMP 500'000
 
 namespace fs = std::filesystem;
 
@@ -43,3 +45,6 @@ void get_lengths(std::unordered_map<std::string, unsigned int>& chromosome_lengt
 
 //function to get chr index by name
 int get_index(const std::string& chr_name);
+
+//function to get chr name by index
+std::string get_name(int chr_index);

@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include <limits>
 #include <ostream>
+#include <vector>
+#include <cstdint>
 
 #include "common.h"
 
@@ -26,6 +28,42 @@ inline std::ostream& operator<<(std::ostream& out, const NA_double& v) {
 		return out << "NA";
 	return out << v.value;
 }
+
+
+//structure for coverage of region (targets)
+struct Coverage {
+	unsigned int total_len = 0; // without N
+	unsigned int c_ds = 0;
+	unsigned int tc_ds = 0;
+	unsigned int tc_ds_3_end_hairpin = 0;
+
+	Coverage& operator+=(const Coverage& other) {
+		total_len += other.total_len;
+		c_ds += other.c_ds;
+		tc_ds += other.tc_ds;
+		tc_ds_3_end_hairpin += other.tc_ds_3_end_hairpin;
+		return *this;
+	}
+};
+
+
+//structure for mutation counts in region
+struct MutCounts {
+	unsigned int all = 0;
+	unsigned int c_ds = 0;
+	unsigned int tc_ds = 0;
+	unsigned int tc_ds_apobec = 0;
+	unsigned int tc_ds_apobec_hairpin_end = 0;
+
+	MutCounts& operator+=(const MutCounts& other) {
+		all += other.all;
+		c_ds += other.c_ds;
+		tc_ds += other.tc_ds;
+		tc_ds_apobec += other.tc_ds_apobec;
+		tc_ds_apobec_hairpin_end += other.tc_ds_apobec_hairpin_end;
+		return *this;
+	}
+};
 
 
 //structure for statistics
@@ -113,6 +151,12 @@ struct Stat {
 			k_fourth = mutations_tc_ds_apobec_hairpin_end;
 			n_fourth = mutations_tc_ds;
 		}
+
+	Stat(const Coverage& coverage, const MutCounts& mutations) :
+		Stat(coverage.total_len, coverage.tc_ds, coverage.c_ds, coverage.tc_ds_3_end_hairpin,
+			mutations.all, mutations.tc_ds, mutations.tc_ds_apobec, mutations.c_ds, mutations.tc_ds_apobec_hairpin_end)
+	{
+	}
 };
 
 
@@ -121,8 +165,36 @@ struct Mut {
 	unsigned int position;
 	char ref;
 	char alt;
+	uint8_t code = 0b1111'1111; // index code of reference position, set in annotate_mutations
 
 	bool operator<(const Mut& other) const { return position < other.position; }
+};
+
+
+//struct for window
+struct Window {
+	unsigned int start;
+	unsigned int end; //include
+	Coverage coverage;
+};
+
+
+//struct for analysed region of chromosome (whole chromosome or -s/-e)
+struct ChrRegion {
+	std::string name;
+	std::string level; // "chromosome" or "region"
+	unsigned int start;
+	unsigned int end; //include
+	Coverage coverage;
+	std::vector<Window> windows;
+	std::vector<std::uint8_t> packed; // index bytes of region (2 positions per byte)
+
+	//function to get index code of position (0-based chromosome coordinate)
+	std::uint8_t code_at(unsigned int pos) const {
+		std::uint8_t byte = packed[pos / 2 - start / 2];
+		// even position - low 4 bits, odd position - high 4 bits
+		return (pos % 2 == 0) ? (byte & 0b0000'1111) : (byte >> 4);
+	}
 };
 
 
@@ -180,8 +252,8 @@ inline double binom_p_value(double p0, unsigned k, unsigned n) {
 }
 
 
-//function to unpack index
-void unpack_index(std::ifstream& index, const std::string& chromosome, std::vector<std::uint8_t>& charset_chr, std::unordered_map<std::string, unsigned int>& chr_lens, const ProgrammOptions& options);
+//function to read packed index of region (region name, start and end must be set)
+void read_region(std::ifstream& index, ChrRegion& region, std::unordered_map<std::string, unsigned int>& chr_lens);
 
 //function to define algorythm type;
 void define_alg(ProgrammOptions& options);
@@ -189,17 +261,29 @@ void define_alg(ProgrammOptions& options);
 //function to get array with vcf path
 std::vector<fs::path> get_vcf_paths(const ProgrammOptions& options);
 
+//function to get single nucleotide substitutions from ref and one alt allele (MNV are split, indels give nothing)
+std::vector<Mut> get_substitutions(const std::string& ref, const std::string& alt);
+
 //function to get mutations from vcf file
-void load_vcf(const fs::path& vcf_path, std::vector<std::vector<Mut>>& chr_mutations, const ProgrammOptions& options);
+void load_vcf(const fs::path& vcf_path, std::vector<std::vector<Mut>>& chr_mutations, const ProgrammOptions& options, const std::unordered_map<std::string, unsigned int>& chr_lens);
 
-//function to wtire line in output file
-void write_line(std::ofstream& output_file, const Stat& w_stat, unsigned int window_start, unsigned int window_end, const ProgrammOptions& options, const fs::path& vcf_path);
+//function to count coverage of part of region (0-based chromosome coordinates, end include)
+Coverage region_coverage(const ChrRegion& region, unsigned int start, unsigned int end);
 
-//function to process one window
-Stat window_stat(unsigned int window_start, unsigned int window_end, const ProgrammOptions& options, const std::vector<std::uint8_t>& charset_chr, const std::vector<std::vector<Mut>>& chr_mutations);
+//function to split region into windows (last window can be shorter)
+std::vector<Window> make_windows(const ChrRegion& region, const ProgrammOptions& options);
 
-//funstion for windows
-void process_windows(const ProgrammOptions& options, const std::vector<std::uint8_t>& charset_chr, const std::vector<std::vector<Mut>>& chr_mutations, std::ofstream& output_file, const fs::path& vcf_path);
+//function to check mutations with reference and save their index codes
+void annotate_mutations(std::vector<Mut>& mutations, const ChrRegion& region, const fs::path& vcf_path);
+
+//function to count mutations in window (mutations must be sorted and annotated)
+MutCounts count_mutations(const std::vector<Mut>& mutations, unsigned int window_start, unsigned int window_end);
+
+//function to write header of output file
+void write_header(std::ostream& output_file);
+
+//function to wtire line in output file (start and end are 1-based)
+void write_line(std::ostream& output_file, const Stat& w_stat, const std::string& sample, const std::string& level, const std::string& chromosome, std::uint64_t start, std::uint64_t end);
 
 //slow algorythm
 void slow_alg(ProgrammOptions& options);

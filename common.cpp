@@ -53,7 +53,7 @@ fs::path getExecutableDirectory() {
 #elif __APPLE__
 
 	char p[4000];
-	int size = sizeof(p);
+	uint32_t size = sizeof(p);
 
 	if (_NSGetExecutablePath(p, &size) != 0)
 		throw runtime_error("Cannot get executable path");
@@ -104,4 +104,18 @@ int get_index(const string& chr) {
 		return 23;
 
 	return stoi(chr.substr(3)) - 1;
+}
+
+
+
+//function to get chr name by index
+string get_name(int chr_index) {
+
+	if (chr_index == 22)
+		return "chrX";
+
+	if (chr_index == 23)
+		return "chrY";
+
+	return "chr" + to_string(chr_index + 1);
 }

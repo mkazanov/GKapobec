@@ -7,10 +7,63 @@
 #include <iostream>
 #include <iomanip>
 
+#include <zlib.h>
 
 #include "run.h"
 
 using namespace std;
+
+
+//class to read lines from plain or gzip (bgzip) file
+//zlib reads not compressed files as is, so one class is used for .vcf and .vcf.gz
+class LineReader {
+public:
+	explicit LineReader(const fs::path& path) {
+		file = gzopen(path.string().c_str(), "rb");
+		if (file)
+			gzbuffer(file, 1 << 20);
+	}
+
+	~LineReader() {
+		if (file)
+			gzclose(file);
+	}
+
+	LineReader(const LineReader&) = delete;
+	LineReader& operator=(const LineReader&) = delete;
+
+	bool is_open() const { return file != nullptr; }
+
+	//function to read next line (without \n and \r), returns false at the end of file
+	bool getline(string& line) {
+
+		line.clear();
+		char buffer[4096];
+
+		while (gzgets(file, buffer, sizeof(buffer)) != nullptr) {
+
+			line += buffer;
+
+			if (line.back() == '\n') {
+				line.pop_back();
+				if (!line.empty() && line.back() == '\r')
+					line.pop_back();
+				return true;
+			}
+		}
+
+		// end of file or error (e.g. truncated gzip file)
+		int error;
+		const char* message = gzerror(file, &error);
+		if (error != Z_OK)
+			throw runtime_error(string("cannot read file: ") + message);
+
+		return !line.empty();
+	}
+
+private:
+	gzFile file = nullptr;
+};
 
 //function to define algorythm type
 void define_alg(ProgrammOptions& options) {
@@ -18,69 +71,31 @@ void define_alg(ProgrammOptions& options) {
 }
 
 
-//function to unpack index
-void unpack_index(ifstream& index, const string& chromosome, vector<uint8_t>& charset_chr, unordered_map<string, unsigned int>& chr_lens, const ProgrammOptions& options) {
+//function to read packed index of region (region name, start and end must be set)
+void read_region(ifstream& index, ChrRegion& region, unordered_map<string, unsigned int>& chr_lens) {
 
-	short chr_index = get_index(chromosome);
-	unsigned int left = 0;
+	int chr_index = get_index(region.name);
+	uint64_t left = 0;
 
-	for (int i = 0; i < chr_index; ++i) {
-		string chr;
-		if (i == 22)
-			chr = "chrX";
-		else if (i == 23)
-			chr = "chrY";
-		else
-			chr = "chr" + to_string(i + 1);
+	for (int i = 0; i < chr_index; ++i)
+		left += (chr_lens[get_name(i)] + 1) / 2;
 
-		left += (chr_lens[chr] + 1) / 2;
-	}
-
-	unsigned int start;
-	unsigned int end;
-
-	if (options.use_boundaries) {
-		start = options.start_position;
-		end = options.end_position;
-	}
-
-	else {
-		start = 0;
-		end = chr_lens[chromosome] - 1;
-	}
-
-	if (end < start || end >= chr_lens[chromosome])
+	if (region.end < region.start || region.end >= chr_lens[region.name])
 		throw runtime_error("invalid chromosome boundaries");
 
-	unsigned int length = end - start + 1;
-	charset_chr.resize(length);
-	index.seekg(left + start / 2);
+	unsigned int bytes_cnt = region.end / 2 - region.start / 2 + 1;
 
-	unsigned int pos = 0;
+	region.packed.resize(bytes_cnt);
+	index.clear();
+	index.seekg(static_cast<streamoff>(left + region.start / 2));
 
-	while (pos < length)
-	{
-		uint8_t byte;
-
-		if (!index.read(reinterpret_cast<char*>(&byte), 1))
-			throw runtime_error("cannot read index file");
-
-		if (start % 2 == 1 && pos == 0) {
-			charset_chr[pos++] = byte >> 4;
-		}
-
-		else {
-			charset_chr[pos++] = byte & 0b00001111;
-			if (pos < length) {
-				charset_chr[pos++] = byte >> 4;
-			}
-		}
-	}
+	if (!index.read(reinterpret_cast<char*>(region.packed.data()), bytes_cnt))
+		throw runtime_error("cannot read index file");
 }
 
 
 //function to get array with vcf path
-vector<fs::path> get_vcf_paths(const ProgrammOptions& options) 
+vector<fs::path> get_vcf_paths(const ProgrammOptions& options)
 {
 	vector<fs::path> vcf_paths;
 
@@ -89,7 +104,11 @@ vector<fs::path> get_vcf_paths(const ProgrammOptions& options)
 	}
 	else if (options.use_vcf_dir()) {
 		for (const fs::directory_entry& p : fs::directory_iterator(options.vcf_dir)) {
-			if (p.is_regular_file() && p.path().extension() == ".vcf")
+			string file_name = p.path().filename().string();
+			bool is_vcf = file_name.size() > 4 && file_name.compare(file_name.size() - 4, 4, ".vcf") == 0;
+			bool is_vcf_gz = file_name.size() > 7 && file_name.compare(file_name.size() - 7, 7, ".vcf.gz") == 0;
+
+			if (p.is_regular_file() && (is_vcf || is_vcf_gz))
 				vcf_paths.push_back(p.path());
 		}
 	}
@@ -111,153 +130,274 @@ vector<fs::path> get_vcf_paths(const ProgrammOptions& options)
 }
 
 
-//function to get mutations from vcf file
-void load_vcf(const fs::path& vcf_path, vector<vector<Mut>>& chr_mutations, const ProgrammOptions& options) {
-	
-	ifstream vcf(vcf_path);
+//function to get single nucleotide substitutions from ref and one alt allele
+//alleles of equal length are compared position by position: CA -> TA is C -> T, CC -> TT (MNV) is two C -> T
+//alleles of different length (indels) and symbolic alleles (<DEL>, breakends) give no substitutions
+//positions with non ACGT bases (*, N, ...) are skipped
+//position of substitution is offset from vcf POS
+vector<Mut> get_substitutions(const string& ref, const string& alt) {
 
-	if (!vcf)
+	vector<Mut> substitutions;
+
+	if (ref.size() != alt.size())
+		return substitutions;
+
+	if (alt.find_first_of("<>[]") != string::npos)
+		return substitutions;
+
+	const string nucleotides = "ACGT";
+
+	for (unsigned int i = 0; i < ref.size(); ++i) {
+
+		if (ref[i] == alt[i])
+			continue;
+
+		if (nucleotides.find(ref[i]) == string::npos || nucleotides.find(alt[i]) == string::npos)
+			continue;
+
+		Mut substitution;
+		substitution.position = i;
+		substitution.ref = ref[i];
+		substitution.alt = alt[i];
+		substitutions.push_back(substitution);
+	}
+
+	return substitutions;
+}
+
+
+//function to get mutations from vcf file
+void load_vcf(const fs::path& vcf_path, vector<vector<Mut>>& chr_mutations, const ProgrammOptions& options, const unordered_map<string, unsigned int>& chr_lens) {
+
+	// .vcf or .vcf.gz
+	LineReader vcf(vcf_path);
+
+	if (!vcf.is_open())
 		throw runtime_error("cannot open vcf file: " + vcf_path.string());
 
 	string line;
-	while (getline(vcf, line)) {
+	unsigned int line_number = 0;
+	while (vcf.getline(line)) {
+
+		line_number++;
 
 		if (line.empty() || line[0] == '#')
 			continue;
 
 		stringstream ss(line);
-		
+
 		string chr;
 		unsigned int pos;
 		string id;
-		char ref;
-		char alt;
+		string ref;
+		string alts;
 
-		ss >> chr >> pos >> id >> ref >> alt;
+		ss >> chr >> pos >> id >> ref >> alts;
+
+		if (!ss || pos == 0)
+			throw runtime_error("cannot parse vcf line " + to_string(line_number));
+
 		pos--;
 
-		if (options.one_chr() && "chr" + chr != options.chromosome)
+		// chromosome name can be with or without "chr" prefix
+		if (chr.rfind("chr", 0) != 0)
+			chr = "chr" + chr;
+
+		// skip contigs which are not in reference (MT, GL..., etc.)
+		unordered_map<string, unsigned int>::const_iterator chr_len = chr_lens.find(chr);
+		if (chr_len == chr_lens.end())
 			continue;
 
-		short chr_index = get_index("chr" + chr);
-	
-		Mut mutation;
+		// position out of chromosome (maybe other reference)
+		if (pos >= chr_len->second)
+			throw runtime_error("position out of chromosome in vcf line " + to_string(line_number));
 
-		mutation.position = pos;
-		mutation.alt = toupper(static_cast<unsigned char>(alt));
-		mutation.ref = toupper(static_cast<unsigned char>(ref));
+		if (options.one_chr() && chr != options.chromosome)
+			continue;
 
-		chr_mutations[chr_index].push_back(mutation);
+		for (char& c : ref)
+			c = toupper(static_cast<unsigned char>(c));
+
+		// multiallelic position (ALT = T,G) gives several substitutions, MNV are split, indels are ignored
+		stringstream alt_ss(alts);
+		string alt;
+		while (getline(alt_ss, alt, ',')) {
+
+			for (char& c : alt)
+				c = toupper(static_cast<unsigned char>(c));
+
+			for (Mut mutation : get_substitutions(ref, alt)) {
+
+				mutation.position += pos;
+
+				if (mutation.position >= chr_len->second)
+					throw runtime_error("position out of chromosome in vcf line " + to_string(line_number));
+
+				chr_mutations[get_index(chr)].push_back(mutation);
+			}
+		}
 	}
+
+	for (vector<Mut>& mutations : chr_mutations)
+		sort(mutations.begin(), mutations.end());
 }
 
 
-//function to process one window
-Stat window_stat(unsigned int window_start, unsigned int window_end, const ProgrammOptions& options, const vector<uint8_t>& charset_chr, const vector<vector<Mut>>& chr_mutations) {
-	
-	unsigned int local_start = window_start - options.start_position;
-	unsigned int local_end = window_end - options.start_position;
-	short chr_index = get_index(options.chromosome);
+//function to count coverage of part of region (0-based chromosome coordinates, end include)
+Coverage region_coverage(const ChrRegion& region, unsigned int start, unsigned int end) {
 
-	//coverage
-	unsigned int total_len = window_end - window_start + 1;
-	unsigned int tc_ds = 0;
-	unsigned int c_ds = 0;
-	unsigned int tc_ds_3_end_hairpin = 0;
+	Coverage coverage;
 
-	for (unsigned int i = local_start; i <= local_end; ++i) {
+	for (unsigned int i = start; i <= end; ++i) {
 
-		uint8_t byte = charset_chr[i];
+		uint8_t byte = region.code_at(i);
 
 		char nucl = define_nucleotide(byte);
 		uint8_t status = (byte >> 2) & 0b0000'0011;
 
-		// N positions are excluded from window length
-		if (nucl == 'N') {
-			total_len--;
+		// N positions are excluded from length
+		if (nucl == 'N')
 			continue;
-		}
+
+		coverage.total_len++;
 
 		if (nucl == 'C' || nucl == 'G') {
-			c_ds++;
+			coverage.c_ds++;
 			if (status != 0b0000'0000) {
-				tc_ds++;
+				coverage.tc_ds++;
 				if (status == 0b0000'0010) {
-					tc_ds_3_end_hairpin++;
+					coverage.tc_ds_3_end_hairpin++;
 				}
 			}
 		}
 	}
 
-	//mutations
-	unsigned int mutations_all = 0;
-	unsigned int mutations_tc_ds = 0;
-	unsigned int mutations_tc_ds_apobec = 0;
-	unsigned int mutations_c_ds = 0;
-	unsigned int mutations_tc_ds_apobec_hairpin_end = 0;
-	
-	for (int i = 0; i < chr_mutations[chr_index].size(); ++i) {
-		const Mut& mutation = chr_mutations[chr_index][i];
+	return coverage;
+}
 
-		if (mutation.position < window_start)
-			continue;
-		if (mutation.position > window_end)
+
+//function to split region into windows (last window can be shorter)
+vector<Window> make_windows(const ChrRegion& region, const ProgrammOptions& options) {
+
+	vector<Window> windows;
+
+	for (unsigned int window_start = region.start; window_start <= region.end; window_start += options.jump) {
+
+		unsigned int window_end = min(window_start + options.window_len - 1, region.end);
+
+		Window window;
+		window.start = window_start;
+		window.end = window_end;
+		window.coverage = region_coverage(region, window_start, window_end);
+		windows.push_back(window);
+
+		if (window_end == region.end)
 			break;
+	}
 
-		unsigned int local_pos = mutation.position - options.start_position;
-		uint8_t byte = charset_chr[local_pos];
-		uint8_t status = (byte >> 2) & 0b0000'0011;
-		char nucl = define_nucleotide(byte);
+	return windows;
+}
 
-		if (nucl != mutation.ref)
-			throw runtime_error("different nucleotides in vcf and reference genome");
 
+//function to check mutations with reference and save their index codes
+void annotate_mutations(vector<Mut>& mutations, const ChrRegion& region, const fs::path& vcf_path) {
+
+	for (Mut& mutation : mutations) {
+
+		if (mutation.position < region.start || mutation.position > region.end)
+			continue;
+
+		uint8_t byte = region.code_at(mutation.position);
+
+		if (define_nucleotide(byte) != mutation.ref)
+			throw runtime_error("different nucleotides in vcf and reference genome: " + vcf_path.string() + ", position " + to_string(mutation.position + 1));
+
+		mutation.code = byte;
+	}
+}
+
+
+//function to count mutations in window (mutations must be sorted and annotated)
+MutCounts count_mutations(const vector<Mut>& mutations, unsigned int window_start, unsigned int window_end) {
+
+	MutCounts counts;
+
+	Mut first;
+	first.position = window_start;
+
+	for (vector<Mut>::const_iterator it = lower_bound(mutations.begin(), mutations.end(), first); it != mutations.end() && it->position <= window_end; ++it) {
+
+		const Mut& mutation = *it;
+		uint8_t status = (mutation.code >> 2) & 0b0000'0011;
+		char nucl = define_nucleotide(mutation.code);
 
 		bool is_apobec_alt = false;
 		if (nucl == 'C')
 			is_apobec_alt = (mutation.alt == 'T') || (mutation.alt == 'G');
 		if (nucl == 'G')
 			is_apobec_alt = (mutation.alt == 'A') || (mutation.alt == 'C');
-		
-		mutations_all++;
+
+		counts.all++;
 		if (nucl == 'C' || nucl == 'G') {
 
-			mutations_c_ds++;
+			counts.c_ds++;
 
 			if (status != 0b0000'0000) {
 
-				mutations_tc_ds++;
+				counts.tc_ds++;
 
 				if (is_apobec_alt)
-					mutations_tc_ds_apobec++;
+					counts.tc_ds_apobec++;
 
 				if (status == 0b0000'0010) {
 
 					if (is_apobec_alt)
-						mutations_tc_ds_apobec_hairpin_end++;
+						counts.tc_ds_apobec_hairpin_end++;
 				}
 			}
 		}
 	}
 
-	Stat w_stat(total_len, tc_ds, c_ds, tc_ds_3_end_hairpin, mutations_all, mutations_tc_ds, mutations_tc_ds_apobec, mutations_c_ds, mutations_tc_ds_apobec_hairpin_end);
-	return w_stat;
+	return counts;
 }
 
 
-//function to wtire line in output file
-void write_line(ofstream& output_file, const Stat& w_stat, unsigned int window_start, unsigned int window_end, const ProgrammOptions& options, const fs::path& vcf_path) {
+//function to write header of output file
+void write_header(ostream& output_file) {
+
+	output_file
+		<< "sample" << '\t'
+		<< "level" << '\t'
+		<< "chromosome" << '\t'
+		<< "start" << '\t'
+		<< "end" << '\t'
+
+		<< "p0_1" << '\t' << "k_1" << '\t' << "n_1" << '\t' << "p_value_1" << '\t'
+		<< "p0_2" << '\t' << "k_2" << '\t' << "n_2" << '\t' << "p_value_2" << '\t'
+		<< "p0_3" << '\t' << "k_3" << '\t' << "n_3" << '\t' << "p_value_3" << '\t'
+		<< "p0_4" << '\t' << "k_4" << '\t' << "n_4" << '\t' << "p_value_4" << '\t'
+
+		<< "len_without_N" << '\t'
+		<< "c_ds" << '\t'
+		<< "tc_ds" << '\t'
+		<< "tc_ds_3_end_hairpin" << '\n';
+}
+
+
+//function to wtire line in output file (start and end are 1-based)
+void write_line(ostream& output_file, const Stat& w_stat, const string& sample, const string& level, const string& chromosome, uint64_t start, uint64_t end) {
 
 	double pv1 = binom_p_value(w_stat.p0_real_first, w_stat.k_first, w_stat.n_first);
 	double pv2 = binom_p_value(w_stat.p0_real_second, w_stat.k_second, w_stat.n_second);
 	double pv3 = binom_p_value(w_stat.p0_real_third, w_stat.k_third, w_stat.n_third);
 	double pv4 = binom_p_value(w_stat.p0_real_fourth, w_stat.k_fourth, w_stat.n_fourth);
-	
+
 	output_file
-		<< vcf_path.string() << '\t'
-		<< options.chromosome << '\t'
-		<< (window_start + 1) << '\t'
-		<< (window_end + 1) << '\t'
+		<< sample << '\t'
+		<< level << '\t'
+		<< chromosome << '\t'
+		<< start << '\t'
+		<< end << '\t'
 
 		<< NA_double{ w_stat.p0_real_first } << '\t'
 		<< w_stat.k_first << '\t'
@@ -287,16 +427,6 @@ void write_line(ofstream& output_file, const Stat& w_stat, unsigned int window_s
 }
 
 
-//funstion for windows
-void process_windows(const ProgrammOptions& options, const vector<uint8_t>& charset_chr, const vector<vector<Mut>>& chr_mutations, ofstream& output_file, const fs::path& vcf_path) {
-	for (unsigned int window_start = options.start_position; window_start + options.window_len - 1 <= options.end_position; window_start += options.jump) {
-		unsigned int window_end = window_start + options.window_len - 1;
-		Stat w_stat = window_stat(window_start, window_end, options, charset_chr, chr_mutations);
-		write_line(output_file, w_stat, window_start, window_end, options, vcf_path);
-	}
-}
-
-
 //slow algorythm
 void slow_alg(ProgrammOptions& options) {
 
@@ -310,67 +440,127 @@ void slow_alg(ProgrammOptions& options) {
 	if (!index)
 		throw runtime_error("first generate index.bin file");
 
-	if (options.one_chr()) 
-	{
-		short chr_index = get_index(options.chromosome);
-		vector<uint8_t> charset_chr;
-
-		if (options.one_chr() && !options.use_boundaries) {
-			options.start_position = 0;
-			options.end_position = chr_lens[options.chromosome] - 1;
-		}
-
-		charset_chr.resize(options.end_position - options.start_position + 1);
-
-		unpack_index(index, options.chromosome, charset_chr, chr_lens, options);
-
-		vector<fs::path> vcf_paths = get_vcf_paths(options);
-		ofstream output_file(fs::path(options.output_dir_path) / "results.tsv");
-		if (!output_file)
-			throw runtime_error("cannot open output file");
-		output_file << fixed << setprecision(10);
-
-		for (fs::path vcf_path : vcf_paths)
-		{
-			vector<vector<Mut>> chr_mutations(24);
-			load_vcf(vcf_path, chr_mutations, options);
-			sort(chr_mutations[chr_index].begin(), chr_mutations[chr_index].end());
-
-			if (options.use_window()) {
-				process_windows(options, charset_chr, chr_mutations, output_file, vcf_path);
-			}
-
-			else {
-				Stat w_stat = window_stat(options.start_position, options.end_position, options, charset_chr, chr_mutations);
-				write_line(output_file, w_stat, options.start_position, options.end_position, options, vcf_path);
-			}
+	// chromosomes to process: one (-c) or all (genome mode)
+	vector<string> chromosomes;
+	if (options.one_chr()) {
+		if (chr_lens.find(options.chromosome) == chr_lens.end())
+			throw runtime_error("unknown chromosome: " + options.chromosome);
+		chromosomes.push_back(options.chromosome);
+	}
+	else {
+		for (int i = 0; i < CHR_CNT; ++i) {
+			if (chr_lens.find(get_name(i)) != chr_lens.end())
+				chromosomes.push_back(get_name(i));
 		}
 	}
 
-	else 
-	{
-		throw runtime_error("in development");
-		//vector<vector<uint8_t>> charset_full(CHR_CNT);
+	// packed index and coverage of regions and windows (once for all samples)
+	vector<ChrRegion> regions;
+	for (const string& chromosome : chromosomes) {
 
-		//for (int i = 0; i < CHR_CNT; ++i) {
-		//	string chr;
-		//	if (i <= 21)
-		//		chr = "chr" + to_string(i + 1);
-		//	if (i == 22)
-		//		chr = "chrX";
-		//	if (i == 23)
-		//		chr = "chrY";
+		ChrRegion region;
+		region.name = chromosome;
 
-		//	charset_full[i].resize(chr_lens[chr]);
-		//	unpack_index(index, chr, charset_full[i], chr_lens);
+		if (options.use_boundaries) {
+			region.level = "region";
+			region.start = options.start_position;
+			region.end = options.end_position;
+		}
+		else {
+			region.level = "chromosome";
+			region.start = 0;
+			region.end = chr_lens[chromosome] - 1;
+		}
+
+		read_region(index, region, chr_lens);
+
+		region.coverage = region_coverage(region, region.start, region.end);
+
+		if (options.use_window())
+			region.windows = make_windows(region, options);
+
+		regions.push_back(std::move(region));
 	}
+
+	ofstream output_file(fs::path(options.output_dir_path) / "results.tsv");
+	if (!output_file)
+		throw runtime_error("cannot open output file");
+	output_file << fixed << setprecision(10);
+
+	write_header(output_file);
+
+	// file with skipped samples and reasons
+	ofstream skipped_file(fs::path(options.output_dir_path) / "skipped.tsv");
+	if (!skipped_file)
+		throw runtime_error("cannot open file for skipped samples");
+	skipped_file << "sample" << '\t' << "reason" << '\n';
+
+	unsigned int processed_cnt = 0;
+	unsigned int skipped_cnt = 0;
+
+	// samples are processed one by one (only one vcf in memory)
+	// lines are grouped by sample: windows and total for each chromosome, then genome
+	for (const fs::path& vcf_path : get_vcf_paths(options)) {
+
+		string sample_name = vcf_path.string();
+
+		// broken sample (cannot read, cannot parse, other reference) is skipped with warning
+		// all checks are before writing, so there are no lines of skipped sample in results
+		vector<vector<Mut>> chr_mutations(CHR_CNT);
+		try {
+			load_vcf(vcf_path, chr_mutations, options, chr_lens);
+
+			for (const ChrRegion& region : regions)
+				annotate_mutations(chr_mutations[get_index(region.name)], region, vcf_path);
+		}
+		catch (const exception& e) {
+			cerr << "warning: sample skipped: " << sample_name << ": " << e.what() << endl;
+			skipped_file << sample_name << '\t' << e.what() << '\n';
+			skipped_cnt++;
+			continue;
+		}
+
+		Coverage genome_coverage;
+		MutCounts genome_mutations;
+		uint64_t genome_len = 0;
+
+		for (const ChrRegion& region : regions) {
+
+			const vector<Mut>& mutations = chr_mutations[get_index(region.name)];
+
+			for (const Window& window : region.windows) {
+				Stat w_stat(window.coverage, count_mutations(mutations, window.start, window.end));
+				write_line(output_file, w_stat, sample_name, "window", region.name, window.start + 1, window.end + 1);
+			}
+
+			MutCounts region_mutations = count_mutations(mutations, region.start, region.end);
+			Stat r_stat(region.coverage, region_mutations);
+			write_line(output_file, r_stat, sample_name, region.level, region.name, region.start + 1, region.end + 1);
+
+			genome_coverage += region.coverage;
+			genome_mutations += region_mutations;
+			genome_len += region.end - region.start + 1;
+		}
+
+		if (!options.one_chr()) {
+			Stat g_stat(genome_coverage, genome_mutations);
+			write_line(output_file, g_stat, sample_name, "genome", "genome", 1, genome_len);
+		}
+
+		processed_cnt++;
+	}
+
+	cerr << "samples processed: " << processed_cnt << ", skipped: " << skipped_cnt << endl;
+
+	if (processed_cnt == 0)
+		throw runtime_error("no samples were processed");
 }
 
 
 //function to process VCF
 void run(ProgrammOptions& options) {
 
-	if (options.alg_type == "undefined" || options.alg_type == "fast") 
+	if (options.alg_type == "undefined" || options.alg_type == "fast")
 		define_alg(options);
 
 	if (options.alg_type == "slow") {
