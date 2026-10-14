@@ -172,6 +172,12 @@ Stat window_stat(unsigned int window_start, unsigned int window_end, const Progr
 		char nucl = define_nucleotide(byte);
 		uint8_t status = (byte >> 2) & 0b0000'0011;
 
+		// N positions are excluded from window length
+		if (nucl == 'N') {
+			total_len--;
+			continue;
+		}
+
 		if (nucl == 'C' || nucl == 'G') {
 			c_ds++;
 			if (status != 0b0000'0000) {
