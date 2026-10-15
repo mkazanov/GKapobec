@@ -28,6 +28,7 @@ struct ProgrammOptions {
 	int end_position = -1; //include
 	bool use_boundaries = false;
 	bool generate = false;
+	bool pass_only = false; // use only variants with FILTER = PASS or .
 
 	bool one_chr() const { return !chromosome.empty(); }
 	bool use_vcf_file() const { return !vcf_file.empty(); }

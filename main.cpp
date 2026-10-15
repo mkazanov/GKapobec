@@ -42,7 +42,7 @@ static void print_usage(ostream& out, const string& prog) {
         << "Usage:\n"
         << "  " << prog << " -g -r hg19\n"
         << "      build genome index data/index.bin (once)\n"
-        << "  " << prog << " -r hg19 (-v FILE | -l LIST | -d DIR) -o OUT_DIR [-c CHR [-s START -e END]] [-w [LEN] [-j STEP]]\n"
+        << "  " << prog << " -r hg19 (-v FILE | -l LIST | -d DIR) -o OUT_DIR [-c CHR [-s START -e END]] [-w [LEN] [-j STEP]] [--pass-only]\n"
         << "      analyse VCF files\n"
         << "\n"
         << "Options:\n"
@@ -60,12 +60,13 @@ static void print_usage(ostream& out, const string& prog) {
         << "  -w [LEN]      sliding window of length LEN\n"
         << "                without LEN: window " << DEFAULT_WINDOW_LEN << ", step " << DEFAULT_JUMP << "\n"
         << "  -j STEP       window step (only with -w), default: LEN\n"
+        << "  --pass-only   use only variants with FILTER = PASS or . (default: all variants)\n"
         << "  -h, --help    show this help\n"
         << "\n"
         << "Output: OUT_DIR/results.tsv (statistics), OUT_DIR/skipped.tsv (skipped samples)\n"
         << "\n"
         << "Examples:\n"
-        << "  " << prog << " -r hg19 -d vcfs/ -o results/\n"
+        << "  " << prog << " -r hg19 -d vcfs/ -o results/ --pass-only\n"
         << "  " << prog << " -r hg19 -l samples.txt -o results/ -w\n"
         << "  " << prog << " -r hg19 -v sample.vcf.gz -o results/ -c chr3 -w 100000\n"
         << "  " << prog << " -r hg19 -v sample.vcf -o results/ -c chr1 -s 1000001 -e 2000000 -w 50000 -j 10000\n";
@@ -101,6 +102,8 @@ int main(int argc, char* argv[]) {
             }
             else if (arg == "-g")
                 options.generate = true;
+            else if (arg == "--pass-only")
+                options.pass_only = true;
             else if (arg == "-o" && has_value)
                 options.output_dir_path = argv[++i];
             else if (arg == "-d" && has_value)

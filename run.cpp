@@ -215,6 +215,17 @@ void load_vcf(const fs::path& vcf_path, vector<vector<Mut>>& chr_mutations, cons
 		if (options.one_chr() && chr != options.chromosome)
 			continue;
 
+		// --pass-only: skip variants which did not pass filters (FILTER is not PASS or .)
+		if (options.pass_only) {
+			string qual;
+			string filter;
+			ss >> qual >> filter;
+			if (!ss)
+				throw runtime_error("no FILTER column in vcf line " + to_string(line_number));
+			if (filter != "PASS" && filter != ".")
+				continue;
+		}
+
 		for (char& c : ref)
 			c = toupper(static_cast<unsigned char>(c));
 

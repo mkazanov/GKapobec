@@ -51,7 +51,7 @@ the program does nothing — delete `data/index.bin` to rebuild it.
 ### 2. Analysis
 
 ```
-./gkapobec -r hg19 (-v FILE | -l LIST | -d DIR) -o OUT_DIR [-c CHR [-s START -e END]] [-w [LEN] [-j STEP]]
+./gkapobec -r hg19 (-v FILE | -l LIST | -d DIR) -o OUT_DIR [-c CHR [-s START -e END]] [-w [LEN] [-j STEP]] [--pass-only]
 ```
 
 | Option | Description |
@@ -65,6 +65,7 @@ the program does nothing — delete `data/index.bin` to rebuild it.
 | `-s START -e END` | chromosome region, 1-based, inclusive. Only with `-c`; both are required |
 | `-w [LEN]` | sliding window of length LEN. Without a number — window 1,000,000 and step 500,000 |
 | `-j STEP` | window step. Only with `-w`. If not given, equals LEN (non-overlapping windows) |
+| `--pass-only` | use only variants that passed filters: FILTER = `PASS` or `.`. By default the FILTER column is ignored and all variants are used |
 | `-g` | build the index (see above) |
 | `-h`, `--help` | print help. Run without arguments, the program prints the same help; on an option error it prints the error and a hint to use `-h` |
 
@@ -77,6 +78,9 @@ Windows start at the beginning of the region and move by STEP; the last window t
 ```
 # whole genome, one line per chromosome + one line for the genome
 ./gkapobec -r hg19 -d vcfs/ -o results/
+
+# the same, only variants with FILTER = PASS or .
+./gkapobec -r hg19 -d vcfs/ -o results/ --pass-only
 
 # whole genome with the default sliding window (1 Mb, step 500 kb)
 ./gkapobec -r hg19 -l samples.txt -o results/ -w
@@ -92,7 +96,9 @@ Windows start at the beginning of the region and move by STEP; the last window t
 
 - Both uncompressed `.vcf` and compressed `.vcf.gz` (gzip or bgzip, as produced by bcftools/tabix) are supported.
   Compression is detected from the file contents, not from the extension.
-- The first five columns are used: `CHROM POS ID REF ALT`. The FILTER column is ignored.
+- The first five columns are used: `CHROM POS ID REF ALT`. The FILTER column is ignored, unless `--pass-only` is given:
+  then only variants with FILTER = `PASS` or `.` are used (in PCAWG consensus files passed variants have `.`),
+  and a line without the FILTER column makes the sample broken.
 - Chromosomes may be with or without the `chr` prefix (`1` and `chr1` are equivalent). Contigs other than 1–22, X, Y
   (`MT`, `GL000…`, etc.) are skipped.
 - REF/ALT parsing:
