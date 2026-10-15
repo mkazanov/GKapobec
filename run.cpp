@@ -370,13 +370,17 @@ void write_header(ostream& output_file) {
 		<< "level" << '\t'
 		<< "chromosome" << '\t'
 		<< "start" << '\t'
-		<< "end" << '\t'
+		<< "end" << '\t';
 
-		<< "p0_1" << '\t' << "k_1" << '\t' << "n_1" << '\t' << "p_value_1" << '\t'
-		<< "p0_2" << '\t' << "k_2" << '\t' << "n_2" << '\t' << "p_value_2" << '\t'
-		<< "p0_3" << '\t' << "k_3" << '\t' << "n_3" << '\t' << "p_value_3" << '\t'
-		<< "p0_4" << '\t' << "k_4" << '\t' << "n_4" << '\t' << "p_value_4" << '\t'
+	for (int i = 1; i <= 4; ++i) {
+		string n = to_string(i);
+		output_file
+			<< "p0_" << n << '\t' << "k_" << n << '\t' << "n_" << n << '\t' << "p_value_" << n << '\t'
+			<< "neg_log10_p_" << n << '\t' << "enrichment_" << n << '\t'
+			<< "f_" << n << '\t' << "f_low_" << n << '\t' << "f_high_" << n << '\t';
+	}
 
+	output_file
 		<< "len_without_N" << '\t'
 		<< "c_ds" << '\t'
 		<< "tc_ds" << '\t'
@@ -387,38 +391,35 @@ void write_header(ostream& output_file) {
 //function to wtire line in output file (start and end are 1-based)
 void write_line(ostream& output_file, const Stat& w_stat, const string& sample, const string& level, const string& chromosome, uint64_t start, uint64_t end) {
 
-	double pv1 = binom_p_value(w_stat.p0_real_first, w_stat.k_first, w_stat.n_first);
-	double pv2 = binom_p_value(w_stat.p0_real_second, w_stat.k_second, w_stat.n_second);
-	double pv3 = binom_p_value(w_stat.p0_real_third, w_stat.k_third, w_stat.n_third);
-	double pv4 = binom_p_value(w_stat.p0_real_fourth, w_stat.k_fourth, w_stat.n_fourth);
+	struct { double p0; unsigned int k; unsigned int n; } tests[4] = {
+		{ w_stat.p0_real_first, w_stat.k_first, w_stat.n_first },
+		{ w_stat.p0_real_second, w_stat.k_second, w_stat.n_second },
+		{ w_stat.p0_real_third, w_stat.k_third, w_stat.n_third },
+		{ w_stat.p0_real_fourth, w_stat.k_fourth, w_stat.n_fourth },
+	};
 
 	output_file
 		<< sample << '\t'
 		<< level << '\t'
 		<< chromosome << '\t'
 		<< start << '\t'
-		<< end << '\t'
+		<< end << '\t';
 
-		<< NA_double{ w_stat.p0_real_first } << '\t'
-		<< w_stat.k_first << '\t'
-		<< w_stat.n_first << '\t'
-		<< NA_double{ pv1 } << '\t'
+	for (const auto& test : tests) {
+		TestResult res = binom_test(test.p0, test.k, test.n);
+		output_file
+			<< NA_double{ test.p0 } << '\t'
+			<< test.k << '\t'
+			<< test.n << '\t'
+			<< NA_double{ res.p_value } << '\t'
+			<< NA_double{ res.neg_log10_p } << '\t'
+			<< NA_double{ res.enrichment } << '\t'
+			<< NA_double{ res.f } << '\t'
+			<< NA_double{ res.f_low } << '\t'
+			<< NA_double{ res.f_high } << '\t';
+	}
 
-		<< NA_double{ w_stat.p0_real_second } << '\t'
-		<< w_stat.k_second << '\t'
-		<< w_stat.n_second << '\t'
-		<< NA_double{ pv2 } << '\t'
-
-		<< NA_double{ w_stat.p0_real_third } << '\t'
-		<< w_stat.k_third << '\t'
-		<< w_stat.n_third << '\t'
-		<< NA_double{ pv3 } << '\t'
-
-		<< NA_double{ w_stat.p0_real_fourth } << '\t'
-		<< w_stat.k_fourth << '\t'
-		<< w_stat.n_fourth << '\t'
-		<< NA_double{ pv4 } << '\t'
-
+	output_file
 		// coverage
 		<< w_stat.total_len << '\t'
 		<< w_stat.c_ds << '\t'
@@ -485,7 +486,7 @@ void slow_alg(ProgrammOptions& options) {
 	ofstream output_file(fs::path(options.output_dir_path) / "results.tsv");
 	if (!output_file)
 		throw runtime_error("cannot open output file");
-	output_file << fixed << setprecision(10);
+	output_file << setprecision(8); // significant digits, small p-values are written as 1.2345678e-25
 
 	write_header(output_file);
 

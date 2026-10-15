@@ -66,6 +66,7 @@ the program does nothing — delete `data/index.bin` to rebuild it.
 | `-w [LEN]` | sliding window of length LEN. Without a number — window 1,000,000 and step 500,000 |
 | `-j STEP` | window step. Only with `-w`. If not given, equals LEN (non-overlapping windows) |
 | `-g` | build the index (see above) |
+| `-h`, `--help` | print help. Run without arguments, the program prints the same help; on an option error it prints the error and a hint to use `-h` |
 
 Exactly one of `-v`, `-l`, `-d` must be given.
 
@@ -120,6 +121,9 @@ Table with a header; lines are grouped by sample: chromosome windows, chromosome
 | `chromosome` | chromosome (`genome` for the genome line) |
 | `start`, `end` | coordinates, 1-based, inclusive (for the genome: 1 and the total length of chromosomes) |
 | `p0_i`, `k_i`, `n_i`, `p_value_i` | test i = 1…4 (see below) |
+| `neg_log10_p_i` | −log10(p_value_i), computed in log space, so it stays finite even when `p_value_i` underflows to 0 (p < 1e-308) |
+| `enrichment_i` | enrichment (k/n)/p0 |
+| `f_i`, `f_low_i`, `f_high_i` | estimated fraction of APOBEC mutations (k/n − p0)/(1 − p0) and its 95% confidence interval |
 | `len_without_N` | region length excluding N |
 | `c_ds` | number of C/G positions |
 | `tc_ds` | number of TC/GA positions (TpC motif on either strand) |
@@ -140,8 +144,31 @@ An APOBEC mutation is C>T/C>G in TC or G>A/G>C in GA.
 | 3 | APOBEC mutations | substitutions at TC/GA | 1 |
 | 4 | APOBEC mutations at the 3' end of a hairpin loop | substitutions at TC/GA | `tc_ds_3_end_hairpin / tc_ds` |
 
-If the region has no targets for a test, p0 and p-value are `NA`: test 1 — when `len_without_N = 0`
+### Effect size
+
+With tens of thousands of mutations per sample even a weak effect gives p-values close to 0, so each test also
+reports the effect size.
+
+- **Enrichment** E = (k/n) / p0: how many times the observed fraction of APOBEC mutations exceeds the expected one.
+  E = 1 means no effect. Test 2 corresponds to the enrichment of Roberts et al., *Nat Genet* 2013
+  (up to the factor 2/3 in p0). E of test 3 cannot exceed 1.5 (p0 = 2/3), so E is not comparable between tests.
+- **Fraction of APOBEC mutations** f = (k/n − p0) / (1 − p0). Mixture model: a fraction f of the n mutations is made by APOBEC
+  (all of them are counted in k), the rest is background, of which a fraction p0 falls into k by chance; then
+  k/n = f + (1 − f)·p0. f does not depend on mutational load and is comparable between tests and samples:
+  test 1 — fraction among all substitutions, test 2 — among substitutions at C/G, test 3 — among substitutions at TC/GA,
+  test 4 — excess of mutations at the 3' end of hairpin loops among substitutions at TC/GA (APOBEC3A).
+  f is not clipped: negative values mean fewer APOBEC mutations than expected.
+- **95% confidence interval** for f: Clopper–Pearson interval for k/n transformed by the same formula.
+  Use it to judge small windows, where f is noisy.
+
+Numbers are written with 8 significant digits (small values as `1.2345678e-25`). Infinite `neg_log10_p_i`
+(p0 = 0 and k > 0, impossible for consistent data) is written as `Inf`.
+
+### NA values
+
+If the region has no targets for a test, p0, p-value and the effect size columns are `NA`: test 1 — when `len_without_N = 0`
 (window consisting entirely of N), test 2 — when `c_ds = 0`, tests 3 and 4 — when `tc_ds = 0`.
+`enrichment_i` is also `NA` when p0 = 0 (e.g. test 4 in a region without hairpins), `enrichment_i` and `f_*` — when n = 0.
 No multiple-testing correction is applied.
 
 ### `OUT_DIR/skipped.tsv`

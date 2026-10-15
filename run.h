@@ -18,7 +18,7 @@ namespace fs = std::filesystem;
 // value for undefined statistics (written as NA)
 const double NA = std::numeric_limits<double>::quiet_NaN();
 
-//structure to write double as NA if it is undefined
+//structure to write double as NA if it is undefined (and infinity as Inf)
 struct NA_double {
 	double value;
 };
@@ -26,6 +26,8 @@ struct NA_double {
 inline std::ostream& operator<<(std::ostream& out, const NA_double& v) {
 	if (std::isnan(v.value))
 		return out << "NA";
+	if (std::isinf(v.value))
+		return out << (v.value > 0 ? "Inf" : "-Inf");
 	return out << v.value;
 }
 
@@ -230,25 +232,117 @@ inline char define_nucleotide(uint8_t byte) {
 }
 
 
-//functions for p-value
-inline double binom_pmf(double p, unsigned k, unsigned n) {
-    if (k > n)    return 0.0;
-    if (p <= 0.0) return k == 0 ? 1.0 : 0.0;
-    if (p >= 1.0) return k == n ? 1.0 : 0.0;
-    return std::exp(std::lgamma(n + 1.0) - std::lgamma(k + 1.0) - std::lgamma(n - k + 1.0)
-                    + k * std::log(p) + (n - k) * std::log1p(-p));
+//functions for statistics
+
+//continued fraction for incomplete beta function (modified Lentz method)
+inline double beta_cf(double a, double b, double x) {
+	const double tiny = 1e-300;
+	const double eps = 1e-15;
+	double c = 1.0;
+	double d = 1.0 - (a + b) * x / (a + 1.0);
+	if (std::fabs(d) < tiny) d = tiny;
+	d = 1.0 / d;
+	double h = d;
+	for (int m = 1; m < 1'000'000; ++m) {
+		double m2 = 2.0 * m;
+		// even step
+		double aa = m * (b - m) * x / ((a + m2 - 1.0) * (a + m2));
+		d = 1.0 + aa * d;
+		if (std::fabs(d) < tiny) d = tiny;
+		c = 1.0 + aa / c;
+		if (std::fabs(c) < tiny) c = tiny;
+		d = 1.0 / d;
+		h *= d * c;
+		// odd step
+		aa = -(a + m) * (a + b + m) * x / ((a + m2) * (a + m2 + 1.0));
+		d = 1.0 + aa * d;
+		if (std::fabs(d) < tiny) d = tiny;
+		c = 1.0 + aa / c;
+		if (std::fabs(c) < tiny) c = tiny;
+		d = 1.0 / d;
+		double delta = d * c;
+		h *= delta;
+		if (std::fabs(delta - 1.0) < eps)
+			break;
+	}
+	return h;
 }
 
-inline double binom_p_value(double p0, unsigned k, unsigned n) {
-    if (std::isnan(p0))  return NA;
-    if (k == 0)          return 1.0;
-    if (n == 0 || k > n) return 0.0;
-    double s = 0.0;
-    for (unsigned i = n; i >= k; --i) {   
-        s += binom_pmf(p0, i, n);
-        if (i == 0) break;                
-    }
-    return std::min(s, 1.0);
+//function to get natural log of regularized incomplete beta function I_x(a, b), a > 0, b > 0
+inline double log_beta_inc(double a, double b, double x) {
+	if (x <= 0.0) return -std::numeric_limits<double>::infinity();
+	if (x >= 1.0) return 0.0;
+	double log_front = std::lgamma(a + b) - std::lgamma(a) - std::lgamma(b) + a * std::log(x) + b * std::log1p(-x);
+	if (x < (a + 1.0) / (a + b + 2.0))
+		return log_front + std::log(beta_cf(a, b, x)) - std::log(a);
+	// I_x(a, b) = 1 - I_(1-x)(b, a), here I_x(a, b) is not small
+	double other = std::exp(log_front + std::log(beta_cf(b, a, 1.0 - x)) - std::log(b));
+	return std::log1p(-std::min(other, 1.0));
+}
+
+//function to get natural log of one-sided binomial p-value P(X >= k), X ~ Bin(n, p0)
+inline double log_binom_p_value(double p0, unsigned k, unsigned n) {
+	if (std::isnan(p0)) return NA;
+	if (k == 0)         return 0.0;
+	if (k > n)          return -std::numeric_limits<double>::infinity();
+	if (p0 <= 0.0)      return -std::numeric_limits<double>::infinity();
+	if (p0 >= 1.0)      return 0.0;
+	// P(X >= k) = I_p0(k, n - k + 1)
+	return log_beta_inc(k, n - k + 1.0, p0);
+}
+
+//function to get quantile of beta distribution (bisection)
+inline double beta_quantile(double q, double a, double b) {
+	double log_q = std::log(q);
+	double lo = 0.0;
+	double hi = 1.0;
+	for (int i = 0; i < 64; ++i) {
+		double mid = (lo + hi) / 2.0;
+		if (log_beta_inc(a, b, mid) < log_q)
+			lo = mid;
+		else
+			hi = mid;
+	}
+	return (lo + hi) / 2.0;
+}
+
+//confidence level for confidence intervals
+const double CONF_LEVEL = 0.95;
+
+//structure for result of one binomial test
+struct TestResult {
+	double p_value = NA;
+	double neg_log10_p = NA; // -log10(p_value), computed without underflow
+	double enrichment = NA;  // (k / n) / p0
+	double f = NA;           // fraction of APOBEC mutations: (k / n - p0) / (1 - p0)
+	double f_low = NA;       // Clopper-Pearson confidence interval for f
+	double f_high = NA;
+};
+
+//function to compute binomial test, enrichment and fraction of APOBEC mutations
+inline TestResult binom_test(double p0, unsigned k, unsigned n) {
+	TestResult res;
+	if (std::isnan(p0))
+		return res;
+
+	double log_p = log_binom_p_value(p0, k, n);
+	res.p_value = std::exp(log_p);
+	res.neg_log10_p = -log_p / std::log(10.0) + 0.0; // + 0.0 to avoid -0
+
+	if (n == 0)
+		return res;
+	double ratio = (double)k / n;
+	if (p0 > 0.0)
+		res.enrichment = ratio / p0;
+	if (p0 < 1.0) {
+		double alpha = 1.0 - CONF_LEVEL;
+		double low = (k == 0) ? 0.0 : beta_quantile(alpha / 2.0, k, n - k + 1.0);
+		double high = (k == n) ? 1.0 : beta_quantile(1.0 - alpha / 2.0, k + 1.0, (double)(n - k));
+		res.f = (ratio - p0) / (1.0 - p0);
+		res.f_low = (low - p0) / (1.0 - p0);
+		res.f_high = (high - p0) / (1.0 - p0);
+	}
+	return res;
 }
 
 
