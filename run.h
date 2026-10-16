@@ -346,6 +346,91 @@ inline TestResult binom_test(double p0, unsigned k, unsigned n) {
 }
 
 
+//structure for final APOBEC activity measure
+struct Activity {
+	double value = NA;    // lower estimate of the fraction of all substitutions made by APOBEC, 0..1
+	double high = NA;     // upper bound of the final interval
+	const char* category = "NA";
+};
+
+
+//function to get activity category by value
+inline const char* activity_category(double value) {
+	if (std::isnan(value))         return "NA";
+	if (value >= ACTIVITY_HIGH)     return "HIGH ACTIVITY";
+	if (value >= ACTIVITY_MODERATE) return "MODERATE ACTIVITY";
+	if (value >= ACTIVITY_LOW)      return "LOW ACTIVITY";
+	return "NO ACTIVITY";
+}
+
+
+//function to compute APOBEC activity: start with test 4 (hairpins, immune to other mutagenesis in TC),
+//then use tests 3, 2, 1 while they agree with it; the result never exceeds the hairpin estimate
+inline Activity apobec_activity(const Stat& stat, const TestResult tests[4]) {
+
+	Activity act;
+
+	unsigned int n1 = stat.mutations_all;
+	unsigned int k = stat.mutations_tc_ds_apobec;
+	unsigned int k4 = stat.mutations_tc_ds_apobec_hairpin_end;
+
+	// without targets or without mutations the measure is undefined
+	if (stat.tc_ds == 0 || stat.tc_ds_3_end_hairpin == 0 || n1 == 0)
+		return act;
+
+	// t - fraction of TC/GA targets at the 3' end of a hairpin loop
+	double t = (double)stat.tc_ds_3_end_hairpin / stat.tc_ds;
+
+	// hairpin enrichment among APOBEC mutations must be significant, otherwise APOBEC is not confirmed
+	// p-value is compared in log space, so a very small one does not underflow to 0
+	if (!(log_binom_p_value(t, k4, k) < std::log(HAIRPIN_P_VALUE_THRESHOLD))) {
+		act.value = 0.0;
+		act.category = activity_category(act.value);
+		return act;
+	}
+
+	// pi - fraction of true APOBEC among k mutations: observed enrichment r/t is a mix of
+	// HAIRPIN_ENRICHMENT_APOBEC (APOBEC) and 1 (any other process)
+	auto purity = [t](double r) {
+		double pi = (r / t - 1.0) / (HAIRPIN_ENRICHMENT_APOBEC - 1.0);
+		return std::min(std::max(pi, 0.0), 1.0);
+	};
+
+	double share = (double)k / n1;
+	double r_low = (k4 == 0) ? 0.0 : beta_quantile((1.0 - CONF_LEVEL) / 2.0, k4, k - k4 + 1.0);
+	double r_high = (k4 >= k) ? 1.0 : beta_quantile(1.0 - (1.0 - CONF_LEVEL) / 2.0, k4 + 1.0, (double)(k - k4));
+
+	double a4 = purity((double)k4 / k) * share;
+	double low = purity(r_low) * share;
+	double high = purity(r_high) * share;
+
+	// tests 3, 2, 1: each one estimates the same fraction, but assumes more about the background
+	unsigned int n[3] = { stat.n_first, stat.n_second, stat.n_third };
+	for (int i = 2; i >= 0; --i) {
+
+		double m = (double)n[i] / n1; // from "fraction among n_i" to "fraction among all substitutions"
+		double test_low = tests[i].f_low * m;
+		double test_high = tests[i].f_high * m;
+
+		if (std::isnan(test_low) || std::isnan(test_high))
+			break;
+		if (test_high < low) // test claims less than the current interval allows
+			break;
+		if (test_low > high) // test claims more: it is contaminated by other mutagenesis
+			break;
+
+		low = std::max(low, test_low);
+		high = std::min(high, test_high);
+	}
+
+	// the measure never exceeds the hairpin estimate, which is the only one immune to other mutagenesis in TC
+	act.value = std::min(low, a4);
+	act.high = high;
+	act.category = activity_category(act.value);
+	return act;
+}
+
+
 //function to read packed index of region (region name, start and end must be set)
 void read_region(std::ifstream& index, ChrRegion& region, std::unordered_map<std::string, unsigned int>& chr_lens);
 

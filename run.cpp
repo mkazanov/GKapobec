@@ -395,7 +395,9 @@ void write_header(ostream& output_file) {
 		<< "len_without_N" << '\t'
 		<< "c_ds" << '\t'
 		<< "tc_ds" << '\t'
-		<< "tc_ds_3_end_hairpin" << '\n';
+		<< "tc_ds_3_end_hairpin" << '\t'
+		<< "apobec_activity" << '\t'
+		<< "apobec_category" << '\n';
 }
 
 
@@ -416,12 +418,16 @@ void write_line(ostream& output_file, const Stat& w_stat, const string& sample, 
 		<< start << '\t'
 		<< end << '\t';
 
-	for (const auto& test : tests) {
-		TestResult res = binom_test(test.p0, test.k, test.n);
+	TestResult results[4];
+	for (int i = 0; i < 4; ++i)
+		results[i] = binom_test(tests[i].p0, tests[i].k, tests[i].n);
+
+	for (int i = 0; i < 4; ++i) {
+		const TestResult& res = results[i];
 		output_file
-			<< NA_double{ test.p0 } << '\t'
-			<< test.k << '\t'
-			<< test.n << '\t'
+			<< NA_double{ tests[i].p0 } << '\t'
+			<< tests[i].k << '\t'
+			<< tests[i].n << '\t'
 			<< NA_double{ res.p_value } << '\t'
 			<< NA_double{ res.neg_log10_p } << '\t'
 			<< NA_double{ res.enrichment } << '\t'
@@ -430,12 +436,17 @@ void write_line(ostream& output_file, const Stat& w_stat, const string& sample, 
 			<< NA_double{ res.f_high } << '\t';
 	}
 
+	Activity activity = apobec_activity(w_stat, results);
+
 	output_file
 		// coverage
 		<< w_stat.total_len << '\t'
 		<< w_stat.c_ds << '\t'
 		<< w_stat.tc_ds << '\t'
-		<< w_stat.tc_ds_3_end_hairpin << '\n';
+		<< w_stat.tc_ds_3_end_hairpin << '\t'
+		// APOBEC activity
+		<< NA_double{ activity.value } << '\t'
+		<< activity.category << '\n';
 }
 
 

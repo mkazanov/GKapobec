@@ -134,6 +134,8 @@ Table with a header; lines are grouped by sample: chromosome windows, chromosome
 | `c_ds` | number of C/G positions |
 | `tc_ds` | number of TC/GA positions (TpC motif on either strand) |
 | `tc_ds_3_end_hairpin` | number of TC/GA positions at the 3' end of a hairpin loop |
+| `apobec_activity` | APOBEC activity: lower estimate of the fraction of all substitutions made by APOBEC, 0…1 (see below) |
+| `apobec_category` | `NO ACTIVITY`, `LOW ACTIVITY`, `MODERATE ACTIVITY` or `HIGH ACTIVITY` |
 
 Total lines (chromosome, region, genome) are computed over the whole region, not by summing windows.
 
@@ -176,6 +178,54 @@ If the region has no targets for a test, p0, p-value and the effect size columns
 (window consisting entirely of N), test 2 — when `c_ds = 0`, tests 3 and 4 — when `tc_ds = 0`.
 `enrichment_i` is also `NA` when p0 = 0 (e.g. test 4 in a region without hairpins), `enrichment_i` and `f_*` — when n = 0.
 No multiple-testing correction is applied.
+
+### APOBEC activity
+
+Each of the four tests estimates the same quantity — the fraction of all substitutions of the sample made by
+APOBEC — but under different assumptions about the background mutagenesis. `apobec_activity` combines them,
+starting from test 4 and adding the less specific tests while they agree with it.
+
+For tests 1-3 the estimate on that common scale and its confidence interval are
+
+```
+a_i = f_i * n_i / n_1,   a_i_low = f_low_i * n_i / n_1,   a_i_high = f_high_i * n_i / n_1
+```
+
+For test 4 (`t` = `tc_ds_3_end_hairpin` / `tc_ds`, `k` = `k_1`, `H_A` = 8):
+
+```
+r  = k_4 / k            fraction of APOBEC mutations at the 3' end of a hairpin loop
+H  = r / t              hairpin enrichment: 1 for any background process, H_A for pure APOBEC
+pi = (H - 1) / (H_A - 1)    fraction of true APOBEC among the k mutations, clipped to [0, 1]
+a_4 = pi * k / n_1
+```
+
+`a_4_low` and `a_4_high` come from the Clopper-Pearson interval for `r` put through the same formulas.
+
+The procedure:
+
+1. If the hairpin enrichment is not significant (one-sided binomial P(X >= k_4), X ~ Bin(k, t), is not below
+   0.001), APOBEC is not confirmed: `apobec_activity` = 0.
+2. The working interval starts as [`a_4_low`, `a_4_high`].
+3. For tests 3, 2, 1 in that order: if the test's interval does not intersect the working interval, stop — the test
+   claims more (contaminated by another process in TC, e.g. UV) or less than test 4 allows, and the less specific
+   tests share its assumptions. Otherwise replace the working interval by the intersection and go on.
+4. `apobec_activity` = min(lower bound of the working interval, `a_4`). The cap matters because `a_4` is the only
+   estimate immune to other mutagenesis in TC, so tests 1-3 may sharpen the estimate below it but never exceed it.
+
+Meaning of the number: at least this fraction of the substitutions was made by APOBEC, provided the accepted tests
+are not contaminated, and never more than the hairpins support. Category boundaries: 0.01, 0.05, 0.2.
+
+Both columns are `NA` when there are no mutations (`n_1` = 0) or no targets (`tc_ds` = 0 or
+`tc_ds_3_end_hairpin` = 0). In small windows `k_4` is almost always 0, so step 1 fails and the result is
+`NO ACTIVITY`; the measure is meant for the chromosome, region and genome lines.
+
+`H_A` = 8 was estimated on PCAWG samples with strong APOBEC activity. It, the significance threshold and the
+category boundaries are constants in `common.h` (`HAIRPIN_ENRICHMENT_APOBEC`, `HAIRPIN_P_VALUE_THRESHOLD`,
+`ACTIVITY_LOW`, `ACTIVITY_MODERATE`, `ACTIVITY_HIGH`).
+
+Known limitations: contamination smaller than the precision of test 4 passes undetected, although the cap keeps it
+below `a_4`; if APOBEC3B prefers hairpins less than APOBEC3A, samples driven by APOBEC3B are underestimated.
 
 ### `OUT_DIR/skipped.tsv`
 

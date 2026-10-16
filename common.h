@@ -10,6 +10,16 @@
 #define DEFAULT_WINDOW_LEN 1'000'000
 #define DEFAULT_JUMP 500'000
 
+// APOBEC activity measure
+// hairpin enrichment of pure APOBEC mutagenesis (estimated on PCAWG samples with strong activity)
+#define HAIRPIN_ENRICHMENT_APOBEC 8.0
+// hairpin enrichment must be significant at this level, otherwise activity is 0
+#define HAIRPIN_P_VALUE_THRESHOLD 0.001
+// boundaries of activity categories
+#define ACTIVITY_LOW 0.01
+#define ACTIVITY_MODERATE 0.05
+#define ACTIVITY_HIGH 0.20
+
 namespace fs = std::filesystem;
 
 // structure for program options
