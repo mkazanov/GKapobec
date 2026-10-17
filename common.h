@@ -8,7 +8,7 @@
 #define MAX_CHR_LENGTH 250'000'000
 #define CHR_CNT 24
 #define DEFAULT_WINDOW_LEN 1'000'000
-#define DEFAULT_JUMP 500'000
+#define DEFAULT_JUMP 1'000'000
 
 // APOBEC activity measure
 // hairpin enrichment of pure APOBEC mutagenesis (estimated on PCAWG samples with strong activity)

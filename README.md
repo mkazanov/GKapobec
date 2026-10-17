@@ -63,7 +63,7 @@ the program does nothing — delete `data/index.bin` to rebuild it.
 | `-o OUT_DIR` | output directory (required, must exist) |
 | `-c CHR` | a single chromosome, e.g. `chr1`, `chrX`. Without `-c` — **whole-genome mode** (all chromosomes) |
 | `-s START -e END` | chromosome region, 1-based, inclusive. Only with `-c`; both are required |
-| `-w [LEN]` | sliding window of length LEN. Without a number — window 1,000,000 and step 500,000 |
+| `-w [LEN]` | sliding window of length LEN. Without a number — window 1,000,000 |
 | `-j STEP` | window step. Only with `-w`. If not given, equals LEN (non-overlapping windows) |
 | `--pass-only` | use only variants that passed filters: FILTER = `PASS` or `.`. By default the FILTER column is ignored and all variants are used |
 | `-g` | build the index (see above) |
@@ -82,7 +82,7 @@ Windows start at the beginning of the region and move by STEP; the last window t
 # the same, only variants with FILTER = PASS or .
 ./gkapobec -r hg19 -d vcfs/ -o results/ --pass-only
 
-# whole genome with the default sliding window (1 Mb, step 500 kb)
+# whole genome with the default sliding window (1 Mb, non-overlapping)
 ./gkapobec -r hg19 -l samples.txt -o results/ -w
 
 # one chromosome, non-overlapping 100 kb windows
